@@ -836,6 +836,51 @@ func Test_redactBodyMutation(t *testing.T) {
 	})
 }
 
+func TestProcessorForPath_PrefixMatch(t *testing.T) {
+	s, err := NewServer(slog.Default(), false)
+	require.NoError(t, err)
+
+	// Register a prefix processor (trailing slash).
+	called := false
+	s.Register("/anthropic/v1/models/", func(cfg *filterapi.RuntimeConfig, headers map[string]string, logger *slog.Logger, isUpstream bool, _ bool) (Processor, error) {
+		called = true
+		return passThroughProcessor{}, nil
+	})
+
+	// Also register an exact-match processor to confirm it takes priority.
+	s.Register("/anthropic/v1/models", func(cfg *filterapi.RuntimeConfig, headers map[string]string, logger *slog.Logger, isUpstream bool, _ bool) (Processor, error) {
+		return passThroughProcessor{}, nil
+	})
+
+	s.config = &filterapi.RuntimeConfig{}
+
+	t.Run("exact match takes priority over prefix", func(t *testing.T) {
+		called = false
+		_, err := s.processorForPath(map[string]string{":path": "/anthropic/v1/models"}, false, slog.Default())
+		require.NoError(t, err)
+		require.False(t, called, "prefix processor should NOT have been called for exact match")
+	})
+
+	t.Run("prefix match for variable path segment", func(t *testing.T) {
+		called = false
+		_, err := s.processorForPath(map[string]string{":path": "/anthropic/v1/models/my-model"}, false, slog.Default())
+		require.NoError(t, err)
+		require.True(t, called, "prefix processor should have been called")
+	})
+
+	t.Run("prefix match with query params", func(t *testing.T) {
+		called = false
+		_, err := s.processorForPath(map[string]string{":path": "/anthropic/v1/models/my-model?version=1"}, false, slog.Default())
+		require.NoError(t, err)
+		require.True(t, called)
+	})
+
+	t.Run("no match returns error", func(t *testing.T) {
+		_, err := s.processorForPath(map[string]string{":path": "/unknown/path"}, false, slog.Default())
+		require.ErrorIs(t, err, errNoProcessor)
+	})
+}
+
 func Test_headersToMap(t *testing.T) {
 	hm := &corev3.HeaderMap{
 		Headers: []*corev3.HeaderValue{

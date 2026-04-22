@@ -96,7 +96,9 @@ func (s *Server) Register(path string, newProcessor ProcessorFactory) {
 var errNoProcessor = errors.New("no processor registered for the given path")
 
 // processorForPath returns the processor for the given path.
-// Only exact path matching is supported currently.
+// Exact path matching is tried first. If no exact match is found, a prefix
+// match is attempted against processors registered with a trailing slash.
+// This enables variable-path endpoints like /anthropic/v1/models/{model_id}.
 func (s *Server) processorForPath(requestHeaders map[string]string, isUpstreamFilter bool, logger *slog.Logger) (Processor, error) {
 	pathHeader := ":path"
 	if isUpstreamFilter {
@@ -109,7 +111,19 @@ func (s *Server) processorForPath(requestHeaders map[string]string, isUpstreamFi
 		path = path[:queryIndex]
 	}
 
+	// Try exact match first.
 	newProcessor, ok := s.processorFactories[path]
+	if !ok {
+		// Fallback: try longest-prefix match against processors registered
+		// with a trailing slash (e.g. "/anthropic/v1/models/").
+		for i := len(path) - 1; i >= 0; i-- {
+			if path[i] == '/' {
+				if newProcessor, ok = s.processorFactories[path[:i+1]]; ok {
+					break
+				}
+			}
+		}
+	}
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", errNoProcessor, path)
 	}
