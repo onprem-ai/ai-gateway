@@ -19,6 +19,10 @@ import (
 const (
 	// EnvoyAIGatewayHeaderPrefix is the prefix for special headers used by AI Gateway, either for internal or external use.
 	EnvoyAIGatewayHeaderPrefix = "x-ai-eg-"
+	// SchemaHeaderKey is the header key set by the ext-proc to indicate the client's API schema
+	// (e.g. "openai", "anthropic", "cohere"). This enables schema-aware routing when the same
+	// model is exposed via multiple API schemas.
+	SchemaHeaderKey = EnvoyAIGatewayHeaderPrefix + "schema"
 	// EnvoyOriginalPathHeader is the Envoy header used to preserve the original request path.
 	EnvoyOriginalPathHeader = "x-envoy-original-path"
 	// OriginalPathHeader is the AI Gateway header used to preserve the original request path.

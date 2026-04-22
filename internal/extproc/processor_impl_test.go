@@ -53,6 +53,18 @@ func TestNewFactory(t *testing.T) {
 		require.NotNil(t, router.tracer)
 	})
 
+	t.Run("router_with_schema_name", func(t *testing.T) {
+		t.Parallel()
+
+		factory := NewFactory(nil, tracingapi.NoopChatCompletionTracer{}, endpointspec.ChatCompletionsEndpointSpec{}, WithSchemaName("openai"))
+		proc, err := factory(cfg, headers, slog.Default(), false, false)
+		require.NoError(t, err)
+		require.IsType(t, &chatCompletionProcessorRouterFilter{}, proc)
+
+		router := proc.(*chatCompletionProcessorRouterFilter)
+		require.Equal(t, "openai", router.schemaName)
+	})
+
 	t.Run("upstream", func(t *testing.T) {
 		t.Parallel()
 
@@ -131,6 +143,71 @@ func Test_chatCompletionProcessorRouterFilter_ProcessRequestBody(t *testing.T) {
 		require.Equal(t, "/foo", string(setHeaders[1].Header.RawValue))
 		require.Equal(t, internalapi.EnvoyOriginalPathHeader, setHeaders[2].Header.Key)
 		require.Equal(t, "/foo", string(setHeaders[2].Header.RawValue))
+	})
+
+	t.Run("ok_with_schema_name", func(t *testing.T) {
+		headers := map[string]string{":path": "/foo"}
+		p := &chatCompletionProcessorRouterFilter{
+			config:         &filterapi.RuntimeConfig{},
+			requestHeaders: headers,
+			logger:         slog.Default(),
+			tracer:         tracingapi.NoopTracer[openai.ChatCompletionRequest, openai.ChatCompletionResponse, openai.ChatCompletionResponseChunk]{},
+			schemaName:     "openai",
+		}
+		resp, err := p.ProcessRequestBody(t.Context(), &extprocv3.HttpBody{Body: bodyFromModel(t, "some-model", false, nil)})
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		re, ok := resp.Response.(*extprocv3.ProcessingResponse_RequestBody)
+		require.True(t, ok)
+		setHeaders := re.RequestBody.GetResponse().GetHeaderMutation().SetHeaders
+		require.Len(t, setHeaders, 4)
+		require.Equal(t, internalapi.ModelNameHeaderKeyDefault, setHeaders[0].Header.Key)
+		require.Equal(t, "some-model", string(setHeaders[0].Header.RawValue))
+		require.Equal(t, internalapi.SchemaHeaderKey, setHeaders[1].Header.Key)
+		require.Equal(t, "openai", string(setHeaders[1].Header.RawValue))
+		require.Equal(t, internalapi.OriginalPathHeader, setHeaders[2].Header.Key)
+		require.Equal(t, "/foo", string(setHeaders[2].Header.RawValue))
+		require.Equal(t, internalapi.EnvoyOriginalPathHeader, setHeaders[3].Header.Key)
+		require.Equal(t, "/foo", string(setHeaders[3].Header.RawValue))
+		require.Equal(t, "openai", headers[internalapi.SchemaHeaderKey])
+	})
+
+	t.Run("ok_with_schema_name_anthropic", func(t *testing.T) {
+		headers := map[string]string{":path": "/foo"}
+		p := &chatCompletionProcessorRouterFilter{
+			config:         &filterapi.RuntimeConfig{},
+			requestHeaders: headers,
+			logger:         slog.Default(),
+			tracer:         tracingapi.NoopTracer[openai.ChatCompletionRequest, openai.ChatCompletionResponse, openai.ChatCompletionResponseChunk]{},
+			schemaName:     "anthropic",
+		}
+		resp, err := p.ProcessRequestBody(t.Context(), &extprocv3.HttpBody{Body: bodyFromModel(t, "some-model", false, nil)})
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		re, ok := resp.Response.(*extprocv3.ProcessingResponse_RequestBody)
+		require.True(t, ok)
+		setHeaders := re.RequestBody.GetResponse().GetHeaderMutation().SetHeaders
+		require.Len(t, setHeaders, 4)
+		require.Equal(t, internalapi.SchemaHeaderKey, setHeaders[1].Header.Key)
+		require.Equal(t, "anthropic", string(setHeaders[1].Header.RawValue))
+	})
+
+	t.Run("ok_without_schema_name_no_extra_header", func(t *testing.T) {
+		headers := map[string]string{":path": "/foo"}
+		p := &chatCompletionProcessorRouterFilter{
+			config:         &filterapi.RuntimeConfig{},
+			requestHeaders: headers,
+			logger:         slog.Default(),
+			tracer:         tracingapi.NoopTracer[openai.ChatCompletionRequest, openai.ChatCompletionResponse, openai.ChatCompletionResponseChunk]{},
+		}
+		resp, err := p.ProcessRequestBody(t.Context(), &extprocv3.HttpBody{Body: bodyFromModel(t, "some-model", false, nil)})
+		require.NoError(t, err)
+		re, ok := resp.Response.(*extprocv3.ProcessingResponse_RequestBody)
+		require.True(t, ok)
+		setHeaders := re.RequestBody.GetResponse().GetHeaderMutation().SetHeaders
+		require.Len(t, setHeaders, 3)
+		_, hasSchemaHeader := headers[internalapi.SchemaHeaderKey]
+		require.False(t, hasSchemaHeader)
 	})
 
 	t.Run("span creation", func(t *testing.T) {

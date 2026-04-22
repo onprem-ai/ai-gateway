@@ -58,13 +58,34 @@ func NewFactory[ReqT any, RespT any, RespChunkT any, EndpointSpecT endpointspec.
 	f metrics.Factory,
 	tracer tracingapi.RequestTracer[ReqT, RespT, RespChunkT],
 	_ EndpointSpecT, // This is a type marker to bind EndpointSpecT without specifying ReqT, RespT, RespChunkT explicitly.
+	opts ...FactoryOption,
 ) ProcessorFactory {
+	var options factoryOptions
+	for _, o := range opts {
+		o(&options)
+	}
 	return func(config *filterapi.RuntimeConfig, requestHeaders map[string]string, logger *slog.Logger, isUpstreamFilter bool, enableRedaction bool) (Processor, error) {
 		logger = logger.With("isUpstreamFilter", fmt.Sprintf("%v", isUpstreamFilter))
 		if !isUpstreamFilter {
-			return newRouterProcessor[ReqT, RespT, RespChunkT, EndpointSpecT](config, requestHeaders, logger, tracer, enableRedaction), nil
+			return newRouterProcessor[ReqT, RespT, RespChunkT, EndpointSpecT](config, requestHeaders, logger, tracer, enableRedaction, options.schemaName), nil
 		}
 		return newUpstreamProcessor[ReqT, RespT, RespChunkT, EndpointSpecT](requestHeaders, f.NewMetrics(), logger), nil
+	}
+}
+
+// factoryOptions holds optional configuration for ProcessorFactory.
+type factoryOptions struct {
+	schemaName string
+}
+
+// FactoryOption configures a ProcessorFactory.
+type FactoryOption func(*factoryOptions)
+
+// WithSchemaName sets the client API schema name (e.g. "openai", "anthropic") that
+// the processor will expose as the x-ai-eg-schema header for schema-aware routing.
+func WithSchemaName(name string) FactoryOption {
+	return func(o *factoryOptions) {
+		o.schemaName = name
 	}
 }
 
@@ -102,6 +123,7 @@ type (
 		stream              bool
 		debugLogEnabled     bool
 		enableRedaction     bool
+		schemaName          string
 	}
 	// upstreamProcessor implements [Processor] for the upstream filter for the standard LLM endpoints.
 	//
@@ -135,6 +157,7 @@ func newRouterProcessor[ReqT, RespT, RespChunkT any, EndpointSpecT endpointspec.
 	logger *slog.Logger,
 	tracer tracingapi.RequestTracer[ReqT, RespT, RespChunkT],
 	enableRedaction bool,
+	schemaName string,
 ) *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT] {
 	debugLogEnabled := logger.Enabled(context.Background(), slog.LevelDebug)
 	return &routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]{
@@ -145,6 +168,7 @@ func newRouterProcessor[ReqT, RespT, RespChunkT any, EndpointSpecT endpointspec.
 		forceBodyMutation: false,
 		debugLogEnabled:   debugLogEnabled,
 		enableRedaction:   enableRedaction,
+		schemaName:        schemaName,
 	}
 }
 
@@ -253,6 +277,12 @@ func (r *routerProcessor[ReqT, RespT, RespChunkT, EndpointSpecT]) ProcessRequest
 		// Set the original model to the request header with the key `x-ai-eg-model`.
 		Header: &corev3.HeaderValue{Key: internalapi.ModelNameHeaderKeyDefault, RawValue: []byte(originalModel)},
 	})
+	if r.schemaName != "" {
+		r.requestHeaders[internalapi.SchemaHeaderKey] = r.schemaName
+		additionalHeaders = append(additionalHeaders, &corev3.HeaderValueOption{
+			Header: &corev3.HeaderValue{Key: internalapi.SchemaHeaderKey, RawValue: []byte(r.schemaName)},
+		})
+	}
 	originalPath := r.requestHeaders[":path"]
 	if r.requestHeaders[originalPathHeader] == "" {
 		r.requestHeaders[originalPathHeader] = originalPath
