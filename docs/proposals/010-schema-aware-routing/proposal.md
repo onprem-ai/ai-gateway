@@ -149,7 +149,7 @@ header is present but ignored when not referenced in match rules.
 
 ## Implementation
 
-### Ext-Proc Changes
+### Phase 1: Schema Header (Implemented)
 
 1. **New constant** `SchemaHeaderKey` (`x-ai-eg-schema`) in the `internalapi` package.
 2. **Factory option** `WithSchemaName(name)` on `NewFactory` — passes the schema name
@@ -162,11 +162,45 @@ header is present but ignored when not referenced in match rules.
 The change is backwards compatible: `WithSchemaName` is a variadic option, so existing
 callers without it produce processors that omit the schema header.
 
+### Phase 2: Anthropic Models Endpoints
+
+The ext-proc already handles `GET /v1/models` by returning an `ImmediateResponse` with
+the model list from the filter config. Two new processors extend this to the Anthropic
+API schema:
+
+1. **`GET /anthropic/v1/models`** — returns the model list in Anthropic's paginated format:
+   ```json
+   {
+     "data": [
+       {
+         "id": "my-model",
+         "type": "model",
+         "display_name": "my-model",
+         "created_at": "2026-01-01T00:00:00Z"
+       }
+     ],
+     "has_more": false,
+     "first_id": "my-model",
+     "last_id": "my-model"
+   }
+   ```
+
+2. **`GET /anthropic/v1/models/{model_id}`** — returns a single model's info, or
+   HTTP 404 if the model is not in the filter config.
+
+Both endpoints:
+- Reuse `config.DeclaredModels` (same source as the OpenAI `/v1/models` processor).
+- Return `ImmediateResponse` — no backend routing needed.
+- Deduplicate models by name (the controller may list the same model multiple times
+  when multiple AIServiceBackends exist for different schemas).
+- Follow the existing `modelsProcessor` pattern (build response at instantiation,
+  return on `ProcessRequestHeaders`).
+
 ### Deployment
 
 The ext-proc changes require a custom binary. The image is built from this fork and
-published to `ghcr.io/onprem-ai/ai-gateway`. The AI Gateway Helm values are updated to
-reference this image for the ext-proc container.
+published to `ghcr.io/onprem-ai/ai-gateway-extproc`. The AI Gateway Helm values are
+updated to reference this image for the ext-proc container.
 
 ## Alternatives Considered
 
