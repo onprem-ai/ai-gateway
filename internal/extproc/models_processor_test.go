@@ -61,6 +61,27 @@ func TestModels_ProcessRequestHeaders(t *testing.T) {
 	}
 }
 
+func TestModels_Deduplication(t *testing.T) {
+	now := time.Now()
+	cfg := &filterapi.RuntimeConfig{DeclaredModels: []filterapi.Model{
+		{Name: "my-model", OwnedBy: "owner-a", CreatedAt: now},
+		{Name: "my-model", OwnedBy: "owner-b", CreatedAt: now},
+		{Name: "other-model", OwnedBy: "owner-c", CreatedAt: now},
+	}}
+	p, err := NewModelsProcessor(cfg, nil, slog.Default(), false, false)
+	require.NoError(t, err)
+	res, err := p.ProcessRequestHeaders(t.Context(), &corev3.HeaderMap{})
+	require.NoError(t, err)
+
+	ir := res.Response.(*extprocv3.ProcessingResponse_ImmediateResponse)
+	var models openai.ModelList
+	require.NoError(t, json.Unmarshal(ir.ImmediateResponse.Body, &models))
+	require.Len(t, models.Data, 2)
+	require.Equal(t, "my-model", models.Data[0].ID)
+	require.Equal(t, "owner-a", models.Data[0].OwnedBy)
+	require.Equal(t, "other-model", models.Data[1].ID)
+}
+
 func headers(in []*corev3.HeaderValueOption) map[string]string {
 	h := make(map[string]string)
 	for _, v := range in {

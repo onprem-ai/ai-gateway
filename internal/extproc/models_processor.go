@@ -42,7 +42,12 @@ func NewModelsProcessor(config *filterapi.RuntimeConfig, _ map[string]string, lo
 		Object: "list",
 		Data:   make([]openai.Model, 0, len(config.DeclaredModels)),
 	}
+	seen := make(map[string]struct{}, len(config.DeclaredModels))
 	for _, m := range config.DeclaredModels {
+		if _, dup := seen[m.Name]; dup {
+			continue
+		}
+		seen[m.Name] = struct{}{}
 		models.Data = append(models.Data, openai.Model{
 			ID:      m.Name,
 			Object:  "model",
