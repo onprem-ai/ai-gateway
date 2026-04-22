@@ -1,0 +1,14 @@
+FROM golang:1.26 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG VERSION=v0.5.0-0-g0000000
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -ldflags "-X github.com/envoyproxy/ai-gateway/internal/version.version=${VERSION}" \
+    -o /extproc ./cmd/extproc
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /extproc /app
+USER nonroot:nonroot
+ENTRYPOINT ["/app"]
