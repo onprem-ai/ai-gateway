@@ -5,6 +5,7 @@
 <!-- toc -->
 
 - [Summary](#summary)
+- [Motivation](#motivation)
 - [Goals](#goals)
 - [Non-Goals](#non-goals)
 - [Background](#background)
@@ -13,8 +14,12 @@
   - [Request Flow](#request-flow)
   - [AIGatewayRoute Example](#aigatewayroute-example)
 - [Implementation](#implementation)
-  - [Ext-Proc Changes](#ext-proc-changes)
+  - [Phase 1: Schema Header](#phase-1-schema-header-implemented)
+  - [Phase 2: Anthropic Models Endpoints](#phase-2-anthropic-models-endpoints)
   - [Deployment](#deployment)
+- [Usage](#usage)
+  - [Option A: Custom Ext-Proc (Recommended)](#option-a-custom-ext-proc-recommended)
+  - [Option B: Lua Filter (Without Fork)](#option-b-lua-filter-without-fork)
 - [Alternatives Considered](#alternatives-considered)
 - [Prior Art](#prior-art)
 
@@ -27,6 +32,43 @@ filter. Today the ext-proc sets only `x-ai-eg-model` after parsing the request b
 A new `x-ai-eg-schema` header (e.g. `openai`, `anthropic`, `cohere`) is set alongside
 the model header, enabling AIGatewayRoute rules to differentiate requests for the same
 model across different API schemas.
+
+## Motivation
+
+Modern self-hosted inference engines like vLLM (v0.11+) serve both the OpenAI and Anthropic
+API schemas on the same port. This means a single model deployment can accept requests at
+`/v1/chat/completions` (OpenAI) and `/v1/messages` (Anthropic) simultaneously — clients
+can use whichever SDK they prefer.
+
+The Envoy AI Gateway doesn't support this out of the box. Its routing is single-dimensional:
+it matches on the model name (`x-ai-eg-model`) but has no concept of which API schema the
+client is using. When two AIGatewayRoute rules exist for the same model — one for OpenAI
+and one for Anthropic — they're indistinguishable to the router.
+
+**Without schema-aware routing**, operators must work around this by creating artificial
+model name variants (e.g. `my-model` for OpenAI and `my-model-anthropic` for Anthropic).
+This pollutes the `/v1/models` list, confuses SDK clients that expect the real model name,
+and requires clients to know about the naming convention.
+
+**With schema-aware routing**, the same model name works across both SDKs transparently:
+
+```python
+# OpenAI SDK — uses /v1/chat/completions
+from openai import OpenAI
+client = OpenAI(base_url="https://gateway.example.com/v1", api_key="sk-...")
+client.chat.completions.create(model="my-model", messages=[...])
+
+# Anthropic SDK — uses /anthropic/v1/messages
+from anthropic import Anthropic
+client = Anthropic(base_url="https://gateway.example.com/anthropic", api_key="sk-...")
+client.messages.create(model="my-model", messages=[...])
+
+# Both route to the same backend, same model name, no workarounds.
+```
+
+The Anthropic SDK also expects `client.models.list()` and `client.models.retrieve("id")`
+to work. Phase 2 adds these endpoints so the Anthropic SDK's model discovery works the
+same way the OpenAI SDK's already does.
 
 ## Goals
 
@@ -201,6 +243,130 @@ Both endpoints:
 The ext-proc changes require a custom binary. The image is built from this fork and
 published to `ghcr.io/onprem-ai/ai-gateway-extproc`. The AI Gateway Helm values are
 updated to reference this image for the ext-proc container.
+
+## Usage
+
+### Option A: Custom Ext-Proc (Recommended)
+
+This approach builds the schema header directly into the ext-proc binary, so it's set
+atomically alongside the model header in `ProcessRequestBody`. No additional Envoy
+filters needed.
+
+1. **Build the fork** — clone the `feat/schema-aware-routing` branch from this repo
+   and build the ext-proc Docker image:
+
+   ```bash
+   git clone https://github.com/onprem-ai/ai-gateway.git -b feat/schema-aware-routing
+   cd ai-gateway
+   docker build -f Dockerfile.extproc \
+     --build-arg VERSION=v0.5.0-0-g0000000 \
+     -t your-registry/ai-gateway-extproc:schema-routing .
+   docker push your-registry/ai-gateway-extproc:schema-routing
+   ```
+
+2. **Override the ext-proc image** in Helm values:
+
+   ```yaml
+   # helmrelease values for envoy-ai-gateway
+   extProc:
+     image:
+       repository: your-registry/ai-gateway-extproc
+       tag: "schema-routing"
+   ```
+
+3. **Create an AIGatewayRoute with dual-header matching** — one rule per schema,
+   both pointing to the same model name but different AIServiceBackends (or the same
+   backend if the inference engine handles both schemas):
+
+   ```yaml
+   apiVersion: aigateway.envoyproxy.io/v1alpha1
+   kind: AIGatewayRoute
+   metadata:
+     name: my-model
+   spec:
+     rules:
+       - matches:
+           - headers:
+               - type: Exact
+                 name: x-ai-eg-model
+                 value: my-model
+               - type: Exact
+                 name: x-ai-eg-schema
+                 value: openai
+         backendRefs:
+           - name: my-model-openai-backend
+       - matches:
+           - headers:
+               - type: Exact
+                 name: x-ai-eg-model
+                 value: my-model
+               - type: Exact
+                 name: x-ai-eg-schema
+                 value: anthropic
+         backendRefs:
+           - name: my-model-anthropic-backend
+   ```
+
+   If the inference engine (e.g. vLLM) serves both schemas on the same port, both
+   rules can reference the same AIServiceBackend.
+
+### Option B: Lua Filter (Without Fork)
+
+If you can't use the custom ext-proc image, you can approximate schema-aware routing
+with a Lua filter injected via EnvoyPatchPolicy. The Lua filter runs before the ext-proc
+and sets a custom header based on the request path.
+
+**Important caveat:** The ext-proc's `ClearRouteCache: true` causes Envoy to re-evaluate
+routing after body processing. Headers set by Lua before the ext-proc *may not survive*
+this re-evaluation depending on your Envoy version and filter chain configuration. Test
+thoroughly before relying on this in production.
+
+1. **Create an EnvoyPatchPolicy** that injects a Lua filter at position [0]:
+
+   ```yaml
+   apiVersion: gateway.envoyproxy.io/v1alpha1
+   kind: EnvoyPatchPolicy
+   metadata:
+     name: schema-header-injection
+     namespace: envoy-gateway-system
+   spec:
+     type: JSONPatch
+     targetRef:
+       group: gateway.networking.k8s.io
+       kind: Gateway
+       name: ai-gateway
+     jsonPatches:
+       - type: "type.googleapis.com/envoy.config.listener.v3.Listener"
+         name: "envoy-gateway-system/ai-gateway/http"
+         operation:
+           op: add
+           path: "/default_filter_chain/filters/0/typed_config/http_filters/0"
+           value:
+             name: "envoy.filters.http.lua"
+             typed_config:
+               "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua"
+               default_source_code:
+                 inline_string: |
+                   function envoy_on_request(request_handle)
+                     local path = request_handle:headers():get(":path")
+                     if path and path:find("^/anthropic/") then
+                       request_handle:headers():add("x-ai-eg-schema", "anthropic")
+                     elseif path and path:find("^/v1/") then
+                       request_handle:headers():add("x-ai-eg-schema", "openai")
+                     end
+                   end
+   ```
+
+2. **Create AIGatewayRoute rules** with `x-ai-eg-schema` header matching (same as
+   Option A, step 3).
+
+3. **Requires** `enableEnvoyPatchPolicy: true` in the Envoy Gateway Helm config.
+
+**Why Option A is preferred:** The ext-proc sets `x-ai-eg-schema` in the same gRPC
+response as `x-ai-eg-model` and `ClearRouteCache`, so both headers are guaranteed
+to be present when Envoy re-evaluates routing. The Lua approach sets the header in
+a separate filter stage, creating a timing dependency on whether Envoy preserves
+pre-ext-proc headers across route cache clears.
 
 ## Alternatives Considered
 
